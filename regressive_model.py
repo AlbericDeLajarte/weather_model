@@ -115,7 +115,7 @@ class MLPModel(pl.LightningModule):
         # optimizer = torch.optim.SGD(self.parameters(), lr=self.lr, momentum=0.9)
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=self.gamma)
-        scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, mode='exp_range',  base_lr=5e-4, max_lr=1e-3, step_size_up=10, cycle_momentum=False, gamma=0.99)
+        scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, mode='exp_range',  base_lr=7e-4, max_lr=2e-3, step_size_up=10, cycle_momentum=False, gamma=0.9995)
         return [optimizer], [scheduler]
     
 
@@ -177,7 +177,7 @@ if __name__ == '__main__':
     
     model = MLPModel(d_input=n_features*past_window, d_output=2, d_layers=[256, 128, 64, 32, 16, 8], dropout=0.0)
 
-    max_epochs = 2000
+    max_epochs = 10000
     trainer = pl.Trainer(
                         accelerator='cpu', devices=1,
                         max_epochs=max_epochs,
