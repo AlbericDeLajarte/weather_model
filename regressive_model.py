@@ -22,7 +22,7 @@ from plotly.subplots import make_subplots
 
 base_path = '/Users/alberic/Desktop/divers/projects/hvac_opt'
 file = 'combined_Room1'
-with open(os.path.join(base_path, 'weather_model', 'data', file, 'normalization.json')) as f:
+with open(os.path.join(base_path, 'weather_model', 'processed_data', 'singapore', file, 'normalization.json')) as f:
     normalization_data = json.load(f)
 
 
@@ -95,7 +95,7 @@ class MLPModel(pl.LightningModule):
 
         if loss.item()<self.best_valid:
             self.best_valid = loss.item()
-        torch.save(self.state_dict(), self.save_path)
+            torch.save(self.state_dict(), self.save_path)
 
 
         # Log loss
@@ -123,7 +123,7 @@ class Weather_dataset(torch.utils.data.Dataset):
     def __init__(self, datasets: int = 0, past_window: int = 1):
 
         # Load dataset from library
-        datas = [np.load(os.path.join('/Users/alberic/Desktop/divers/projects/hvac_opt/weather_model/data/combined_Room1', 
+        datas = [np.load(os.path.join(base_path, 'weather_model', 'processed_data', 'singapore', file, 
                                     f'normalized_data_{dataset}.npy')) for dataset in datasets]
         
         self.input = np.concatenate([
@@ -175,7 +175,7 @@ if __name__ == '__main__':
     n_features = 29
     dataModule = Weather_dataModule(batch_train_size=128, batch_valid_size=128, past_window=past_window)
     
-    model = MLPModel(d_input=n_features*past_window, d_output=2, d_layers=[256, 128, 64, 32, 16, 8], dropout=0.1)
+    model = MLPModel(d_input=n_features*past_window, d_output=2, d_layers=[256, 128, 64, 32, 16, 8], dropout=0.0)
 
     max_epochs = 2000
     trainer = pl.Trainer(
@@ -198,7 +198,7 @@ if __name__ == '__main__':
     # Create figure of all predictions
     model.dropout = nn.Dropout(0.0)
     model.load_state_dict(torch.load(model.save_path, map_location=torch.device('cpu')))
-    test_data = np.load(os.path.join('/Users/alberic/Desktop/divers/projects/hvac_opt/weather_model/data/combined_Room1', 
+    test_data = np.load(os.path.join('/Users/alberic/Desktop/divers/projects/hvac_opt/weather_model/processed_data/singapore/combined_Room1', 
                                     f'normalized_data_{3}.npy')) 
     
     time = test_data[:,0]*(12*31*24) + test_data[:,1]*(31*24) + test_data[:,2]*(24) + test_data[:,3]
@@ -229,7 +229,6 @@ if __name__ == '__main__':
 
         input = copy.copy(test_data[i:i+past_window].flatten())
         outputs = np.zeros((future_window, 2))
-        # outputs[0] = input[i_start_out:i_end_out]
         for j in range(future_window):
 
             with torch.no_grad():
