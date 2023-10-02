@@ -20,14 +20,15 @@ import json
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-base_path = '/Users/alberic/Desktop/divers/projects/hvac_opt'
-file = 'combined_Room1'
-with open(os.path.join(base_path, 'weather_model', 'processed_data', 'singapore', file, 'normalization.json')) as f:
+data_source = 'Pleiade'
+base_path = '/Users/alberic/Desktop/divers/projects/hvac_opt/'
+data_path = os.path.join(base_path, 'weather_model', 'processed_data', data_source)
+with open(os.path.join(data_path, 'normalization.json')) as f:
     normalization_data = json.load(f)
 
 
-i_start_out = 6
-i_end_out = 8
+i_start_out = 4
+i_end_out = 5
 
 class MLPModel(pl.LightningModule):
 
@@ -56,8 +57,8 @@ class MLPModel(pl.LightningModule):
 
         self.best_valid = np.inf
 
-        save_path = os.path.join(base_path, 'weather_model', 'saved_models')
-        new_idx = max([int(file.split('.pt')[0]) for file in os.listdir(save_path)]) + 1
+        save_path = os.path.join(base_path, 'weather_model', 'saved_models', data_source)
+        new_idx = 0 if os.listdir(save_path)==[] else max([int(file.split('.pt')[0]) for file in os.listdir(save_path)]) + 1
 
         self.save_path = os.path.join(save_path, f'{new_idx}.pt')
 
@@ -77,6 +78,8 @@ class MLPModel(pl.LightningModule):
         outputs = self.forward(inputs)
 
         # Compute loss and save it
+        #loss = self.loss(outputs, targets) + 100*self.loss(inputs[:,-29+i_start_out:-29+i_end_out], targets)
+
         loss = self.loss(outputs, targets)
         self.train_losses.append(loss.item())
         # print(loss.item())
@@ -115,21 +118,25 @@ class MLPModel(pl.LightningModule):
         # optimizer = torch.optim.SGD(self.parameters(), lr=self.lr, momentum=0.9)
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=self.gamma)
-        scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, mode='exp_range',  base_lr=7e-4, max_lr=2e-3, step_size_up=10, cycle_momentum=False, gamma=0.9995)
+        scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, mode='exp_range',  base_lr=7e-4, max_lr=2e-3, step_size_up=10, cycle_momentum=False, gamma=0.995)
         return [optimizer], [scheduler]
     
 
 class Weather_dataset(torch.utils.data.Dataset):
-    def __init__(self, datasets: int = 0, past_window: int = 1):
+    def __init__(self, datasets: int = 0, past_window: int = 1, data_type: str = 'train'):
 
         # Load dataset from library
-        datas = [np.load(os.path.join(base_path, 'weather_model', 'processed_data', 'singapore', file, 
-                                    f'normalized_data_{dataset}.npy')) for dataset in datasets]
-        
-        self.input = np.concatenate([
-                        np.concatenate( [data[k:len(data)-(past_window-k)] for k in range(past_window)], axis=1) 
-                for data in datas])
-        self.target = np.concatenate([data[past_window:, i_start_out:i_end_out] for data in datas])
+        # datas = [np.load(os.path.join(base_path, 'weather_model', 'processed_data', 'singapore', file, 
+        #                             f'normalized_data_{dataset}.npy')) for dataset in datasets]
+        self.data = np.load(os.path.join(data_path, f'normalized_data_{data_type}.npy'))
+
+        # self.input = np.concatenate([
+        #                 np.concatenate( [data[k:len(data)-(past_window-k)] for k in range(past_window)], axis=1) 
+        #         for data in datas])
+        # self.target = np.concatenate([data[past_window:, i_start_out:i_end_out] for data in datas])
+
+        self.input = np.concatenate( [self.data[k:len(self.data)-(past_window-k)] for k in range(past_window)], axis=1)
+        self.target = self.data[past_window:, i_start_out:i_end_out]
 
 
     def __len__(self):
@@ -149,9 +156,13 @@ class Weather_dataModule(pl.LightningDataModule):
         self.batch_train_size = batch_train_size
         self.batch_valid_size = batch_valid_size
 
-        self.train_dataset = Weather_dataset(datasets=[0,1,4,5,6,7], past_window=past_window)
-        self.valid_dataset = Weather_dataset(datasets=[2], past_window=past_window)
-        self.test_dataset = Weather_dataset(datasets=[3], past_window=past_window)
+        # self.train_dataset = Weather_dataset(datasets=[0,1,4,5,6,7], past_window=past_window)
+        # self.valid_dataset = Weather_dataset(datasets=[2], past_window=past_window)
+        # self.test_dataset = Weather_dataset(datasets=[3], past_window=past_window)
+
+        self.train_dataset = Weather_dataset(past_window=past_window, data_type='train')
+        self.valid_dataset = Weather_dataset(past_window=past_window, data_type='validation')
+        self.test_dataset = Weather_dataset(past_window=past_window, data_type='test')
 
         self.idx = 0
 
@@ -170,14 +181,16 @@ if __name__ == '__main__':
 
     wandb_logger = WandbLogger(project='weather_model')
 
-    future_window = 64
-    past_window = 16
-    n_features = 29
+    future_window = 32
+    past_window = 4
+    n_features = 19
+    n_predic = (i_end_out-i_start_out)
     dataModule = Weather_dataModule(batch_train_size=128, batch_valid_size=128, past_window=past_window)
     
-    model = MLPModel(d_input=n_features*past_window, d_output=2, d_layers=[256, 128, 64, 32, 16, 8], dropout=0.0)
+    model = MLPModel(d_input=n_features*past_window, d_output=n_predic,
+                        d_layers=[32, 4], dropout=0.0)
 
-    max_epochs = 10000
+    max_epochs = 700
     trainer = pl.Trainer(
                         accelerator='cpu', devices=1,
                         max_epochs=max_epochs,
@@ -189,7 +202,7 @@ if __name__ == '__main__':
                                         LearningRateMonitor(logging_interval='epoch')
                                     ]
                                     )
-
+    wandb_logger.watch(model, log='all', log_freq=100)
     trainer.fit(model=model, datamodule=dataModule)
 
 
@@ -198,8 +211,7 @@ if __name__ == '__main__':
     # Create figure of all predictions
     model.dropout = nn.Dropout(0.0)
     model.load_state_dict(torch.load(model.save_path, map_location=torch.device('cpu')))
-    test_data = np.load(os.path.join('/Users/alberic/Desktop/divers/projects/hvac_opt/weather_model/processed_data/singapore/combined_Room1', 
-                                    f'normalized_data_{3}.npy')) 
+    test_data = dataModule.test_dataset.data
     
     time = test_data[:,0]*(12*31*24) + test_data[:,1]*(31*24) + test_data[:,2]*(24) + test_data[:,3]
     time -= time[0]
@@ -208,27 +220,31 @@ if __name__ == '__main__':
 
         output = copy.copy(output)
 
-        output[:,0] *= normalization_data['humidity'][1]
-        output[:,0] += normalization_data['humidity'][0]
+        # output[:,0] *= normalization_data['humidity'][1]
+        # output[:,0] += normalization_data['humidity'][0]
         
-        output[:,1] *= normalization_data['temperature'][1]
-        output[:,1] += normalization_data['temperature'][0]
+        # output[:,1] *= normalization_data['temperature'][1]
+        # output[:,1] += normalization_data['temperature'][0]
+
+        output[:,0] *= normalization_data['temperature'][1]
+        output[:,0] += normalization_data['temperature'][0]
 
         return output
 
-    rmse_future = np.zeros(2)
+    rmse_future = np.zeros(n_predic)
 
-    fig = make_subplots(rows=2, cols=1)
+    fig = make_subplots(rows=n_predic, cols=1)
     
     test_data_denorm = denormalize(test_data[:, i_start_out:i_end_out])
-    fig.add_trace(go.Scatter(x=time, y=test_data_denorm[:,0], name='Humidity'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=time, y=test_data_denorm[:,1], name='Temperature'), row=2, col=1)
+    # fig.add_trace(go.Scatter(x=time, y=test_data_denorm[:,0], name='Humidity'), row=1, col=1)
+    # fig.add_trace(go.Scatter(x=time, y=test_data_denorm[:,1], name='Temperature'), row=2, col=1)
+    fig.add_trace(go.Scatter(x=time, y=test_data_denorm[:,0], name='Temperature'), row=1, col=1)
 
 
     for i in tqdm(range(0, len(test_data)-future_window-(past_window-1))):
 
         input = copy.copy(test_data[i:i+past_window].flatten())
-        outputs = np.zeros((future_window, 2))
+        outputs = np.zeros((future_window, n_predic))
         for j in range(future_window):
 
             with torch.no_grad():
@@ -246,13 +262,17 @@ if __name__ == '__main__':
             outputs = np.concatenate((test_data[i:i+past_window,i_start_out:i_end_out], outputs))
             outputs_denorm = denormalize(outputs)
             color = ['orange', 'green'][int((i/future_window)%2)]
+            # fig.add_trace(go.Scatter(x=time[i:i+past_window+future_window], y=outputs_denorm[:, 0], opacity=0.5, marker_color=color, showlegend=False), row=1, col=1)
+            # fig.add_trace(go.Scatter(x=time[i:i+past_window+future_window], y=outputs_denorm[:, 1], opacity=0.5, marker_color=color, showlegend=False), row=2, col=1)
             fig.add_trace(go.Scatter(x=time[i:i+past_window+future_window], y=outputs_denorm[:, 0], opacity=0.5, marker_color=color, showlegend=False), row=1, col=1)
-            fig.add_trace(go.Scatter(x=time[i:i+past_window+future_window], y=outputs_denorm[:, 1], opacity=0.5, marker_color=color, showlegend=False), row=2, col=1)
+
 
     rmse_future /= len(test_data)-future_window
 
 
-    fig.update_layout(title=f'Temperature and humidity over time [hr], rmse over one hour: humidity={rmse_future[0]:.3f} and temperature={rmse_future[1]:.3f}',
+    # fig.update_layout(title=f'Temperature and humidity over time [hr], rmse over one hour: humidity={rmse_future[0]:.3f} and temperature={rmse_future[1]:.3f}',
+    #                   height=1000)
+    fig.update_layout(title=f'Temperature over time [hr], rmse over one hour: temperature={rmse_future[0]:.3f}',
                       height=1000)
 
     fig.show()
