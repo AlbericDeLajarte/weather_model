@@ -21,10 +21,12 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 data_source = 'Pleiade'
-base_path = '/Users/alberic/Desktop/divers/projects/hvac_opt/'
-data_path = os.path.join(base_path, 'weather_model', 'processed_data', data_source)
+file_path = os.path.dirname(os.path.abspath(__file__))
+data_path = os.path.join(file_path, 'processed_data', data_source)
 with open(os.path.join(data_path, 'normalization.json')) as f:
     normalization_data = json.load(f)
+
+device = 'cuda'
 
 
 i_start_out = 4
@@ -56,7 +58,7 @@ class TransformerModel(pl.LightningModule):
         self.train_losses = []
         self.best_valid = np.inf
 
-        save_path = os.path.join(base_path, 'weather_model', 'saved_models', 'direct', data_source)
+        save_path = os.path.join(file_path, 'saved_models', 'direct', data_source)
         new_idx = 0 if os.listdir(save_path)==[] else max([int(file.split('.pt')[0]) for file in os.listdir(save_path)]) + 1
 
         self.save_path = os.path.join(save_path, f'{new_idx}.pt')
@@ -196,19 +198,19 @@ class Weather_dataModule(pl.LightningDataModule):
         self.idx = 0
 
     def train_dataloader(self):
-        return torch.utils.data.DataLoader(self.train_dataset, batch_size=self.batch_train_size, shuffle=True, num_workers=0)
+        return torch.utils.data.DataLoader(self.train_dataset, batch_size=self.batch_train_size, shuffle=True, num_workers=1)
 
     def val_dataloader(self):
-        return torch.utils.data.DataLoader(self.valid_dataset, batch_size=self.batch_valid_size, num_workers=0)
+        return torch.utils.data.DataLoader(self.valid_dataset, batch_size=self.batch_valid_size, num_workers=1)
     
     def test_dataloader(self):
-        return torch.utils.data.DataLoader(self.test_dataset, batch_size=self.batch_valid_size, num_workers=0)
+        return torch.utils.data.DataLoader(self.test_dataset, batch_size=self.batch_valid_size, num_workers=1)
     
 
 # Train loop
 if __name__ == '__main__':
 
-    use_wandb = True
+    use_wandb = None
 
     wandb_logger = use_wandb and WandbLogger(project='weather_model')
 
@@ -224,12 +226,13 @@ if __name__ == '__main__':
 
     max_epochs = 20
     trainer = pl.Trainer(
-                        accelerator='cpu', devices=1,
+                        accelerator=device, devices=1,
                         max_epochs=max_epochs,
                         log_every_n_steps=1,
                         accumulate_grad_batches=1,
                         enable_checkpointing=False,
                         logger=wandb_logger,
+                        precision="16-mixed",
                         callbacks=  [
                                         LearningRateMonitor(logging_interval='epoch')
                                     ]
@@ -242,7 +245,7 @@ if __name__ == '__main__':
 
     # Create figure of all predictions
     model.dropout = nn.Dropout(0.0)
-    model.load_state_dict(torch.load(model.save_path, map_location=torch.device('cpu')))
+    model.load_state_dict(torch.load(model.save_path, map_location=torch.device(device=device)))
     test_data = dataModule.test_dataset.data
 
     time = test_data[:,0]*(12*31*24) + test_data[:,1]*(31*24) + test_data[:,2]*(24) + test_data[:,3]
@@ -276,19 +279,8 @@ if __name__ == '__main__':
     for i in tqdm(range(0, len(dataModule.test_dataset))):
 
         input = test_data[i:i+past_window]
-        # outputs = np.zeros((future_window, n_predic))
-        # for j in range(future_window):
-
-        #     with torch.no_grad():
-        #         outputs[j] = model(torch.tensor(input).unsqueeze(0).type(torch.float))[0]
-        #         # print(torch.tensor(input).type(torch.float))
-
-        #         if i+past_window+j<len(test_data):
-        #             input[:-n_features] = input[n_features:]
-        #             input[-n_features:] = copy.copy(test_data[i+j+past_window])
-        #             input[-n_features+i_start_out:-n_features+i_end_out] = outputs[j]
         with torch.no_grad():
-            outputs = model(torch.tensor(input).unsqueeze(0).type(torch.float))[0].numpy()
+            outputs = model(torch.tensor(input).to(device).unsqueeze(0).type(torch.float))[0].cpu().numpy()
 
         rmse_future += np.mean(np.sqrt((denormalize(outputs) - test_data_denorm[i+past_window:i+past_window+past_window])**2), axis=0)
 
