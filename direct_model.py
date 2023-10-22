@@ -26,6 +26,13 @@ data_path = os.path.join(file_path, 'processed_data', data_source)
 with open(os.path.join(data_path, 'normalization.json')) as f:
     normalization_data = json.load(f)
 
+
+save_path = os.path.join(file_path, 'saved_models', 'direct', data_source)
+new_idx = 0 if os.listdir(save_path)==[] else max([int(file.split('.pt')[0]) for file in os.listdir(save_path)]) + 1
+save_path = os.path.join(save_path, f'{new_idx}.pt')
+
+print(save_path)
+
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 i_start_out = 4
@@ -34,10 +41,13 @@ i_end_out = 5
 class TransformerModel(pl.LightningModule):
 
     def __init__(self, n_features: int, n_pred: int, d_model:int, nhead: int, d_hid: int,
-                 nlayers: int, dropout: float = 0.1, lr: float = 1e-2):
+                 nlayers: int, dropout: float = 0.1, lr:float = 1e-3, max_lr:float=1e-4, gamma:float=0.9):
         super().__init__()
         
         self.lr = lr
+        self.max_lr = max_lr
+        self.gamma = gamma
+
         self.n_features = n_features
         self.n_pred = n_pred
         self.loss = nn.MSELoss()
@@ -53,12 +63,6 @@ class TransformerModel(pl.LightningModule):
         self.decoder.bias.data.zero_()
 
         self.train_losses = []
-        self.best_valid = np.inf
-
-        save_path = os.path.join(file_path, 'saved_models', 'direct', data_source)
-        new_idx = 0 if os.listdir(save_path)==[] else max([int(file.split('.pt')[0]) for file in os.listdir(save_path)]) + 1
-
-        self.save_path = os.path.join(save_path, f'{new_idx}.pt')
 
         self.apply(self._init_weights)
 
@@ -102,16 +106,12 @@ class TransformerModel(pl.LightningModule):
 
         # self.valid_losses.append(loss.item())
 
-        if loss.item()<self.best_valid:
-            self.best_valid = loss.item()
-            torch.save(self.state_dict(), self.save_path)
-
         # Log loss
         # self.log("valid/future_loss", future_loss)
         self.log("valid/loss", loss)
         
         return loss
-
+    
 
     def test_step(self, batch, batch_idx):
         inputs, targets = batch
@@ -123,9 +123,32 @@ class TransformerModel(pl.LightningModule):
         # optimizer = torch.optim.SGD(self.parameters(), lr=self.lr, momentum=0.9)
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=1e-4)
         # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=self.gamma)
-        scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, mode='exp_range',  base_lr=1e-4, max_lr=5e-4, step_size_up=10, cycle_momentum=False, gamma=0.99)
+        scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, mode='exp_range',  base_lr=self.lr, max_lr=self.max_lr, step_size_up=10, cycle_momentum=False, gamma=self.gamma)
         return [optimizer], [scheduler]
     
+class PredictionLogger(pl.Callback):
+
+    def __init__(self, n_best=5, wandb_log=True):
+
+        self.wandb_log = wandb_log
+        
+        # self.n_best=n_best
+        self.best_valid = np.inf
+
+        # self.test_examples = {'f1':[], 'pred':[], 'true':[], 'seq':[]}
+        # self.valid_examples = {'pred':[], 'true':[], 'f1':[], 'seq':[]}
+        # self.valid_pairing_sum = []
+
+        self.best_score = 0.0
+
+    def on_validation_end(self, trainer, pl_module):
+
+        loss = trainer.logged_metrics['valid/loss']
+        if loss<self.best_valid:
+            self.best_valid = loss
+            torch.save(pl_module.state_dict(), save_path)
+
+        wandb.log({'valid/best_loss': self.best_valid})
 
 class Weather_dataset(torch.utils.data.Dataset):
     def __init__(self, datasets: int = 0, past_window: int = 1, data_type: str = 'train'):
@@ -191,17 +214,18 @@ if __name__ == '__main__':
 
     wandb_logger = use_wandb and WandbLogger(project='weather_model')
 
-    past_window = 16
+    past_window = 32
     future_window = past_window
     n_features = 19
     n_pred = (i_end_out-i_start_out)
     dataModule = Weather_dataModule(batch_train_size=128, batch_valid_size=128, past_window=past_window)
     
-    model = TransformerModel(n_features=n_features, n_pred=n_pred, d_model = 32,
-                             nhead=4, d_hid=32,
-                            nlayers=8, dropout = 0.0, lr = 5e-3)
+    model = TransformerModel(   n_features=n_features, n_pred=n_pred, 
+                                d_model = 32, nhead=4, d_hid=32, nlayers=8, 
+                                dropout = 0.3, 
+                                lr = 1e-3, max_lr=1e-4, gamma=0.9)
 
-    max_epochs = 30
+    max_epochs = 40
     trainer = pl.Trainer(
                         accelerator=device, devices=1,
                         max_epochs=max_epochs,
@@ -211,7 +235,8 @@ if __name__ == '__main__':
                         logger=wandb_logger,
                         # precision="16-mixed",
                         callbacks=  [
-                                        LearningRateMonitor(logging_interval='epoch')
+                                        LearningRateMonitor(logging_interval='epoch'),
+                                        PredictionLogger()
                                     ]
                                     )
     if use_wandb: wandb_logger.watch(model, log='all', log_freq=100)
@@ -223,7 +248,7 @@ if __name__ == '__main__':
     # Create figure of all predictions
     model = model.to(device)
     model.dropout = nn.Dropout(0.0)
-    model.load_state_dict(torch.load(model.save_path, map_location=torch.device(device=device)))
+    model.load_state_dict(torch.load(save_path, map_location=torch.device(device=device)))
     test_data = dataModule.test_dataset.data
 
     time = test_data[:,0]*(12*31*24) + test_data[:,1]*(31*24) + test_data[:,2]*(24) + test_data[:,3]
@@ -263,12 +288,12 @@ if __name__ == '__main__':
         rmse_future += np.mean(np.sqrt((denormalize(outputs) - test_data_denorm[i+past_window:i+past_window+past_window])**2), axis=0)
 
         if i%past_window==0:
-            outputs = np.concatenate((test_data[i:i+past_window,i_start_out:i_end_out], outputs))
+            # outputs = np.concatenate((test_data[i:i+past_window,i_start_out:i_end_out], outputs))
             outputs_denorm = denormalize(outputs)
             color = ['orange', 'green'][int((i/past_window)%2)]
             # fig.add_trace(go.Scatter(x=time[i:i+past_window+future_window], y=outputs_denorm[:, 0], opacity=0.5, marker_color=color, showlegend=False), row=1, col=1)
             # fig.add_trace(go.Scatter(x=time[i:i+past_window+future_window], y=outputs_denorm[:, 1], opacity=0.5, marker_color=color, showlegend=False), row=2, col=1)
-            fig.add_trace(go.Scatter(x=time[i:i+past_window+past_window], y=outputs_denorm[:, 0], opacity=0.5, marker_color=color, showlegend=False), row=1, col=1)
+            fig.add_trace(go.Scatter(x=time[i+past_window:i+past_window+past_window], y=outputs_denorm[:, 0], opacity=0.5, marker_color=color, showlegend=False), row=1, col=1)
 
 
     rmse_future /= len(test_data)-future_window
