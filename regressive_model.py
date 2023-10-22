@@ -116,10 +116,10 @@ class MLPModel(pl.LightningModule):
 
     def configure_optimizers(self):
         # optimizer = torch.optim.SGD(self.parameters(), lr=self.lr, momentum=0.9)
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=1e-4)
         # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=self.gamma)
-        scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, mode='exp_range',  base_lr=7e-4, max_lr=2e-3, step_size_up=10, cycle_momentum=False, gamma=0.995)
-        return [optimizer], [scheduler]
+        # scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, mode='exp_range',  base_lr=1e-3, max_lr=2e-3, step_size_up=10, cycle_momentum=False, gamma=0.99)
+        return [optimizer]#, [scheduler]
     
 
 class Weather_dataset(torch.utils.data.Dataset):
@@ -176,21 +176,26 @@ class Weather_dataModule(pl.LightningDataModule):
         return torch.utils.data.DataLoader(self.test_dataset, batch_size=self.batch_valid_size, num_workers=0)
     
 # Train loop
-
 if __name__ == '__main__':
 
     wandb_logger = WandbLogger(project='weather_model')
 
     future_window = 32
-    past_window = 4
+    past_window = 16
     n_features = 19
     n_predic = (i_end_out-i_start_out)
     dataModule = Weather_dataModule(batch_train_size=128, batch_valid_size=128, past_window=past_window)
     
-    model = MLPModel(d_input=n_features*past_window, d_output=n_predic,
-                        d_layers=[32, 4], dropout=0.0)
+    ## To try:
+    # - l2 norm
+    # - batch/linear norm
+    # - small batch size
+    # - research on companies/commercial products
 
-    max_epochs = 700
+    model = MLPModel(d_input=n_features*past_window, d_output=n_predic,
+                        d_layers=[256,128,64,32,16,8], dropout=0.0, lr=5e-4)
+
+    max_epochs = 1000
     trainer = pl.Trainer(
                         accelerator='cpu', devices=1,
                         max_epochs=max_epochs,
