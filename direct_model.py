@@ -26,8 +26,7 @@ data_path = os.path.join(file_path, 'processed_data', data_source)
 with open(os.path.join(data_path, 'normalization.json')) as f:
     normalization_data = json.load(f)
 
-device = 'cuda'
-
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 i_start_out = 4
 i_end_out = 5
@@ -47,10 +46,8 @@ class TransformerModel(pl.LightningModule):
         
         self.model_type = 'Transformer'
         self.encoder = nn.Linear(n_features, d_model)
-        self.pos_encoder = PositionalEncoding(d_model, dropout)
 
-        encoder_layers = TransformerEncoderLayer(d_model, nhead, d_hid, dropout, batch_first=True, norm_first=True, activation='gelu')
-        self.transformer_encoder = TransformerEncoder(encoder_layers, nlayers)
+        self.transformer_encoder = nn.Sequential(*[TransformerEncoderLayer(d_model,nhead,d_hid,dropout,batch_first=True,norm_first=True,activation="gelu",)for i in range(nlayers)])
         
         self.decoder = nn.Linear(d_model, n_pred)
         self.decoder.bias.data.zero_()
@@ -63,7 +60,12 @@ class TransformerModel(pl.LightningModule):
 
         self.save_path = os.path.join(save_path, f'{new_idx}.pt')
 
+        self.apply(self._init_weights)
 
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            if module.bias is not None:
+                module.bias.data.zero_()
 
 
     def forward(self, src: Tensor) -> Tensor:
@@ -74,9 +76,7 @@ class TransformerModel(pl.LightningModule):
         Returns:
             output Tensor of shape [batch_size, seq_len, D]
         """
-        # src *= np.sqrt(self.n_features)
         src = self.encoder(src)
-        src = self.pos_encoder(src)
         output = self.transformer_encoder(src)
         output = self.decoder(output)
         return output
@@ -123,31 +123,8 @@ class TransformerModel(pl.LightningModule):
         # optimizer = torch.optim.SGD(self.parameters(), lr=self.lr, momentum=0.9)
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=1e-4)
         # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=self.gamma)
-        # scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, mode='exp_range',  base_lr=1e-3, max_lr=2e-3, step_size_up=10, cycle_momentum=False, gamma=0.99)
-        return [optimizer]#, [scheduler]
-    
-
-class PositionalEncoding(nn.Module):
-
-    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
-        super().__init__()
-        self.dropout = nn.Dropout(p=dropout)
-
-        position = torch.arange(max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * (-np.log(10000.0) / d_model))
-        pe = torch.zeros(max_len, d_model)
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe)
-
-    def forward(self, x: Tensor) -> Tensor:
-        """
-        Args:
-            x: Tensor, shape [seq_len, batch_size, embedding_dim]
-        """
-        x = x + self.pe[:x.shape[1]]
-        # x = torch.concatenate((x, torch.tile(self.pe[:x.shape[1]], (x.shape[0], 1, 1))), 2)
-        return self.dropout(x)
+        scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, mode='exp_range',  base_lr=1e-4, max_lr=5e-4, step_size_up=10, cycle_momentum=False, gamma=0.99)
+        return [optimizer], [scheduler]
     
 
 class Weather_dataset(torch.utils.data.Dataset):
@@ -198,19 +175,19 @@ class Weather_dataModule(pl.LightningDataModule):
         self.idx = 0
 
     def train_dataloader(self):
-        return torch.utils.data.DataLoader(self.train_dataset, batch_size=self.batch_train_size, shuffle=True, num_workers=1)
+        return torch.utils.data.DataLoader(self.train_dataset, batch_size=self.batch_train_size, shuffle=True, num_workers=0)
 
     def val_dataloader(self):
-        return torch.utils.data.DataLoader(self.valid_dataset, batch_size=self.batch_valid_size, num_workers=1)
+        return torch.utils.data.DataLoader(self.valid_dataset, batch_size=self.batch_valid_size, num_workers=0)
     
     def test_dataloader(self):
-        return torch.utils.data.DataLoader(self.test_dataset, batch_size=self.batch_valid_size, num_workers=1)
+        return torch.utils.data.DataLoader(self.test_dataset, batch_size=self.batch_valid_size, num_workers=0)
     
 
 # Train loop
 if __name__ == '__main__':
 
-    use_wandb = None
+    use_wandb = 1
 
     wandb_logger = use_wandb and WandbLogger(project='weather_model')
 
@@ -222,9 +199,9 @@ if __name__ == '__main__':
     
     model = TransformerModel(n_features=n_features, n_pred=n_pred, d_model = 32,
                              nhead=4, d_hid=32,
-                            nlayers=8, dropout = 0.0, lr = 2e-3)
+                            nlayers=8, dropout = 0.0, lr = 5e-3)
 
-    max_epochs = 20
+    max_epochs = 30
     trainer = pl.Trainer(
                         accelerator=device, devices=1,
                         max_epochs=max_epochs,
@@ -232,7 +209,7 @@ if __name__ == '__main__':
                         accumulate_grad_batches=1,
                         enable_checkpointing=False,
                         logger=wandb_logger,
-                        precision="16-mixed",
+                        # precision="16-mixed",
                         callbacks=  [
                                         LearningRateMonitor(logging_interval='epoch')
                                     ]
@@ -244,6 +221,7 @@ if __name__ == '__main__':
     ## Testing loop ##
 
     # Create figure of all predictions
+    model = model.to(device)
     model.dropout = nn.Dropout(0.0)
     model.load_state_dict(torch.load(model.save_path, map_location=torch.device(device=device)))
     test_data = dataModule.test_dataset.data
@@ -285,12 +263,12 @@ if __name__ == '__main__':
         rmse_future += np.mean(np.sqrt((denormalize(outputs) - test_data_denorm[i+past_window:i+past_window+past_window])**2), axis=0)
 
         if i%past_window==0:
-            # outputs = np.concatenate((test_data[i:i+past_window,i_start_out:i_end_out], outputs))
+            outputs = np.concatenate((test_data[i:i+past_window,i_start_out:i_end_out], outputs))
             outputs_denorm = denormalize(outputs)
             color = ['orange', 'green'][int((i/past_window)%2)]
             # fig.add_trace(go.Scatter(x=time[i:i+past_window+future_window], y=outputs_denorm[:, 0], opacity=0.5, marker_color=color, showlegend=False), row=1, col=1)
             # fig.add_trace(go.Scatter(x=time[i:i+past_window+future_window], y=outputs_denorm[:, 1], opacity=0.5, marker_color=color, showlegend=False), row=2, col=1)
-            fig.add_trace(go.Scatter(x=time[i+past_window:i+past_window+past_window], y=outputs_denorm[:, 0], opacity=0.5, marker_color=color, showlegend=False), row=1, col=1)
+            fig.add_trace(go.Scatter(x=time[i:i+past_window+past_window], y=outputs_denorm[:, 0], opacity=0.5, marker_color=color, showlegend=False), row=1, col=1)
 
 
     rmse_future /= len(test_data)-future_window
@@ -301,4 +279,6 @@ if __name__ == '__main__':
     fig.update_layout(title=f'Temperature over time [hr], rmse over one hour: temperature={rmse_future[0]:.3f}',
                         height=1000)
 
-    fig.show()
+    # fig.show()
+
+    wandb.log({"final/trajectories": fig})

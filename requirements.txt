@@ -1,0 +1,5 @@
+numpy
+torch
+wandb
+lightning
+plotly
