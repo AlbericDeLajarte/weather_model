@@ -51,6 +51,8 @@ class TransformerModel(pl.LightningModule):
         self.n_features = n_features
         self.n_pred = n_pred
         self.loss = nn.MSELoss()
+
+        print('CONFIG', self.lr, self.max_lr, self.gamma)
         
         self.save_hyperparameters()
         
@@ -210,20 +212,41 @@ class Weather_dataModule(pl.LightningDataModule):
 # Train loop
 if __name__ == '__main__':
 
+
     use_wandb = 1
 
     wandb_logger = use_wandb and WandbLogger(project='weather_model')
+    if wandb.config:
+        batch_train_size = wandb.config.batch_train_size
+        d_model = wandb.config.d_model
+        n_heads = wandb.config.n_heads
+        d_hid = wandb.config.d_hid
+        n_layers = wandb.config.n_layers
+        dropout = wandb.config.dropout
+        lr = wandb.config.lr
+        max_lr = wandb.config.max_lr
+        gamma = wandb.config.gamma
+    else:
+        batch_train_size = 128
+        d_model = 32
+        n_heads = 4
+        d_hid = 32
+        n_layers = 8
+        dropout = 0.3
+        lr = 1e-3
+        max_lr = 1e-4
+        gamma = 0.9
 
     past_window = 32
     future_window = past_window
     n_features = 19
     n_pred = (i_end_out-i_start_out)
-    dataModule = Weather_dataModule(batch_train_size=128, batch_valid_size=128, past_window=past_window)
+    dataModule = Weather_dataModule(batch_train_size=batch_train_size, batch_valid_size=128, past_window=past_window)
     
     model = TransformerModel(   n_features=n_features, n_pred=n_pred, 
-                                d_model = 32, nhead=4, d_hid=32, nlayers=8, 
-                                dropout = 0.3, 
-                                lr = 1e-3, max_lr=1e-4, gamma=0.9)
+                                d_model = d_model, nhead=n_heads, d_hid=d_hid, nlayers=n_layers, 
+                                dropout = dropout, 
+                                lr =lr, max_lr=max_lr, gamma=gamma)
 
     max_epochs = 40
     trainer = pl.Trainer(
