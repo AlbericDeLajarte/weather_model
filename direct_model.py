@@ -40,27 +40,29 @@ i_end_out = 5
 
 class TransformerModel(pl.LightningModule):
 
-    def __init__(self, n_features: int, n_pred: int, d_model:int, nhead: int, d_hid: int,
-                 nlayers: int, dropout: float = 0.1, lr:float = 1e-3, max_lr:float=1e-4, gamma:float=0.9):
+    def __init__(self, n_features_encoder: int, n_features_decoder: int, n_pred: int, d_model:int, n_heads: int, d_hid: int,
+                 num_encoder_layers: int, num_decoder_layers:int, 
+                 dropout: float = 0.1, lr:float = 1e-3, max_lr:float=1e-4, gamma:float=0.9):
         super().__init__()
         
         self.lr = lr
         self.max_lr = max_lr
         self.gamma = gamma
 
-        self.n_features = n_features
         self.n_pred = n_pred
         self.loss = nn.MSELoss()
 
-        print('CONFIG', self.lr, self.max_lr, self.gamma)
-        
         self.save_hyperparameters()
         
         self.model_type = 'Transformer'
-        self.encoder = nn.Linear(n_features, d_model)
 
-        self.transformer_encoder = nn.Sequential(*[TransformerEncoderLayer(d_model,nhead,d_hid,dropout,batch_first=True,norm_first=True,activation="gelu",)for i in range(nlayers)])
+        # self.transformer_encoder = nn.Sequential(*[TransformerEncoderLayer(d_model,nhead,d_hid,dropout,batch_first=True,norm_first=True,activation="gelu",)for i in range(nlayers)])
+        self.transformer_model = nn.Transformer(d_model=d_model, dim_feedforward=d_hid, nhead=n_heads, 
+                                                num_encoder_layers=num_encoder_layers, num_decoder_layers=num_decoder_layers, 
+                                                dropout=dropout, activation='gelu' ,batch_first=True, norm_first=True)
         
+        self.encoder_adapter = nn.Linear(n_features_encoder, d_model)
+        self.decoder_adapter = nn.Linear(n_features_decoder, d_model)
         self.decoder = nn.Linear(d_model, n_pred)
         self.decoder.bias.data.zero_()
 
@@ -82,8 +84,11 @@ class TransformerModel(pl.LightningModule):
         Returns:
             output Tensor of shape [batch_size, seq_len, D]
         """
-        src = self.encoder(src)
-        output = self.transformer_encoder(src)
+        input, target = src
+        input = self.encoder_adapter(input)
+        target = self.decoder_adapter(target)
+
+        output = self.transformer_model(input, target)
         output = self.decoder(output)
         return output
 
@@ -153,13 +158,14 @@ class PredictionLogger(pl.Callback):
         wandb.log({'valid/best_loss': self.best_valid})
 
 class Weather_dataset(torch.utils.data.Dataset):
-    def __init__(self, datasets: int = 0, past_window: int = 1, data_type: str = 'train'):
+    def __init__(self, datasets: int = 0, past_window: int = 1, future_window:int=1, data_type: str = 'train'):
 
         # Load dataset from library
         # datas = [np.load(os.path.join(base_path, 'weather_model', 'processed_data', 'singapore', file, 
         #                             f'normalized_data_{dataset}.npy')) for dataset in datasets]
         self.data = np.load(os.path.join(data_path, f'normalized_data_{data_type}.npy'))
         self.past_window = past_window
+        self.future_window = future_window
 
         # self.input = np.concatenate([
         #                 np.concatenate( [data[k:len(data)-(past_window-k)] for k in range(past_window)], axis=1) 
@@ -173,16 +179,18 @@ class Weather_dataset(torch.utils.data.Dataset):
 
 
     def __len__(self):
-        return len(self.data)-2*self.past_window+1
+        return len(self.data)-self.past_window-self.future_window+1
     
     def __getitem__(self, idx):
-        return ( torch.tensor(self.data[idx:idx+self.past_window]).type(torch.float), 
-                 torch.tensor(self.data[idx+self.past_window:idx+2*self.past_window, i_start_out:i_end_out]).type(torch.float) )        
+        future_data = torch.tensor(self.data[idx+self.past_window:idx+self.past_window+self.future_window]).type(torch.float)
+
+        return ( (torch.tensor(self.data[idx:idx+self.past_window]).type(torch.float), torch.concatenate((future_data[:, :i_start_out], future_data[:, i_end_out:]), dim=1) ),
+                 future_data[:, i_start_out:i_end_out]   )       
     
 
 class Weather_dataModule(pl.LightningDataModule):
 
-    def __init__(self, batch_train_size: int = 32, batch_valid_size: int = 32, past_window: int=1):
+    def __init__(self, batch_train_size: int = 32, batch_valid_size: int = 32, past_window: int=1, future_window:int=1):
         super().__init__()
         self.save_hyperparameters()
 
@@ -193,11 +201,9 @@ class Weather_dataModule(pl.LightningDataModule):
         # self.valid_dataset = Weather_dataset(datasets=[2], past_window=past_window)
         # self.test_dataset = Weather_dataset(datasets=[3], past_window=past_window)
 
-        self.train_dataset = Weather_dataset(past_window=past_window, data_type='train')
-        self.valid_dataset = Weather_dataset(past_window=past_window, data_type='validation')
-        self.test_dataset = Weather_dataset(past_window=past_window, data_type='test')
-
-        self.idx = 0
+        self.train_dataset = Weather_dataset(past_window=past_window, future_window=future_window, data_type='train')
+        self.valid_dataset = Weather_dataset(past_window=past_window, future_window=future_window, data_type='validation')
+        self.test_dataset = Weather_dataset(past_window=past_window, future_window=future_window, data_type='test')
 
     def train_dataloader(self):
         return torch.utils.data.DataLoader(self.train_dataset, batch_size=self.batch_train_size, shuffle=True, num_workers=0)
@@ -212,16 +218,19 @@ class Weather_dataModule(pl.LightningDataModule):
 # Train loop
 if __name__ == '__main__':
 
-
     use_wandb = 1
 
     wandb_logger = use_wandb and WandbLogger(project='weather_model')
-    if wandb.config:
+
+    if len(wandb.config._as_dict())>1:
         batch_train_size = wandb.config.batch_train_size
         d_model = wandb.config.d_model
         n_heads = wandb.config.n_heads
         d_hid = wandb.config.d_hid
-        n_layers = wandb.config.n_layers
+        n_features_encoder = wandb.config.n_features_encoder
+        n_features_decoder = wandb.config.n_features_decoder
+        num_encoder_layers = wandb.config.num_encoder_layers
+        num_decoder_layers = wandb.config.num_decoder_layers
         dropout = wandb.config.dropout
         lr = wandb.config.lr
         max_lr = wandb.config.max_lr
@@ -231,24 +240,26 @@ if __name__ == '__main__':
         d_model = 32
         n_heads = 4
         d_hid = 32
-        n_layers = 8
+        n_features_encoder = 19
+        n_features_decoder = 18
+        num_encoder_layers = 4
+        num_decoder_layers = 4
         dropout = 0.3
-        lr = 1e-3
-        max_lr = 1e-4
+        lr = 1e-4
+        max_lr = 1e-3
         gamma = 0.9
 
-    past_window = 32
-    future_window = past_window
-    n_features = 19
+    past_window = 64
+    future_window = 32
     n_pred = (i_end_out-i_start_out)
-    dataModule = Weather_dataModule(batch_train_size=batch_train_size, batch_valid_size=128, past_window=past_window)
+    dataModule = Weather_dataModule(batch_train_size=batch_train_size, batch_valid_size=128, past_window=past_window, future_window=future_window)
     
-    model = TransformerModel(   n_features=n_features, n_pred=n_pred, 
-                                d_model = d_model, nhead=n_heads, d_hid=d_hid, nlayers=n_layers, 
+    model = TransformerModel(   n_features_encoder=n_features_encoder, n_features_decoder=n_features_decoder, n_pred=n_pred, 
+                                d_model = d_model, n_heads=n_heads, d_hid=d_hid, num_encoder_layers=num_encoder_layers, num_decoder_layers=num_decoder_layers,
                                 dropout = dropout, 
                                 lr =lr, max_lr=max_lr, gamma=gamma)
-
-    max_epochs = 40
+    
+    max_epochs = 20
     trainer = pl.Trainer(
                         accelerator=device, devices=1,
                         max_epochs=max_epochs,
@@ -272,6 +283,7 @@ if __name__ == '__main__':
     model = model.to(device)
     model.dropout = nn.Dropout(0.0)
     model.load_state_dict(torch.load(save_path, map_location=torch.device(device=device)))
+
     test_data = dataModule.test_dataset.data
 
     time = test_data[:,0]*(12*31*24) + test_data[:,1]*(31*24) + test_data[:,2]*(24) + test_data[:,3]
@@ -305,18 +317,20 @@ if __name__ == '__main__':
     for i in tqdm(range(0, len(dataModule.test_dataset))):
 
         input = test_data[i:i+past_window]
+        target = test_data[i+past_window:i+past_window+future_window]
+        target = np.concatenate((target[:, :i_start_out], target[:, i_end_out:]), axis=1)
         with torch.no_grad():
-            outputs = model(torch.tensor(input).to(device).unsqueeze(0).type(torch.float))[0].cpu().numpy()
+            outputs = model( (torch.tensor(input).to(device).unsqueeze(0).type(torch.float) ,torch.tensor(target).to(device).unsqueeze(0).type(torch.float)) )[0].cpu().numpy()
 
-        rmse_future += np.mean(np.sqrt((denormalize(outputs) - test_data_denorm[i+past_window:i+past_window+past_window])**2), axis=0)
+        rmse_future += np.mean(np.sqrt((denormalize(outputs) - test_data_denorm[i+past_window:i+past_window+future_window])**2), axis=0)
 
-        if i%past_window==0:
+        if i%future_window==0:
             # outputs = np.concatenate((test_data[i:i+past_window,i_start_out:i_end_out], outputs))
             outputs_denorm = denormalize(outputs)
             color = ['orange', 'green'][int((i/past_window)%2)]
             # fig.add_trace(go.Scatter(x=time[i:i+past_window+future_window], y=outputs_denorm[:, 0], opacity=0.5, marker_color=color, showlegend=False), row=1, col=1)
             # fig.add_trace(go.Scatter(x=time[i:i+past_window+future_window], y=outputs_denorm[:, 1], opacity=0.5, marker_color=color, showlegend=False), row=2, col=1)
-            fig.add_trace(go.Scatter(x=time[i+past_window:i+past_window+past_window], y=outputs_denorm[:, 0], opacity=0.5, marker_color=color, showlegend=False), row=1, col=1)
+            fig.add_trace(go.Scatter(x=time[i+past_window:i+past_window+future_window], y=outputs_denorm[:, 0], opacity=0.5, marker_color=color, showlegend=False), row=1, col=1)
 
 
     rmse_future /= len(test_data)-future_window
