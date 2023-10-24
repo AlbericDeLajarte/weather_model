@@ -68,7 +68,7 @@ class TransformerModel(pl.LightningModule):
 
         self.train_losses = []
 
-        self.apply(self._init_weights)
+        # self.apply(self._init_weights)
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -221,45 +221,47 @@ if __name__ == '__main__':
     use_wandb = 1
 
     wandb_logger = use_wandb and WandbLogger(project='weather_model')
+    wandb.init()
 
     if len(wandb.config._as_dict())>1:
         batch_train_size = wandb.config.batch_train_size
         d_model = wandb.config.d_model
         n_heads = wandb.config.n_heads
         d_hid = wandb.config.d_hid
-        n_features_encoder = wandb.config.n_features_encoder
-        n_features_decoder = wandb.config.n_features_decoder
+        # n_features_encoder = wandb.config.n_features_encoder
+        # n_features_decoder = wandb.config.n_features_decoder
         num_encoder_layers = wandb.config.num_encoder_layers
         num_decoder_layers = wandb.config.num_decoder_layers
         dropout = wandb.config.dropout
         lr = wandb.config.lr
         max_lr = wandb.config.max_lr
         gamma = wandb.config.gamma
+        past_window = wandb.config.past_window
     else:
         batch_train_size = 128
         d_model = 32
-        n_heads = 4
+        n_heads = 8
         d_hid = 32
-        n_features_encoder = 19
-        n_features_decoder = 18
-        num_encoder_layers = 4
-        num_decoder_layers = 4
-        dropout = 0.3
-        lr = 1e-4
-        max_lr = 1e-3
-        gamma = 0.9
+        # n_features_encoder = 19
+        # n_features_decoder = 18
+        num_encoder_layers = 2
+        num_decoder_layers = 2
+        dropout = 0
+        lr = 1e-5
+        max_lr = 1e-5
+        gamma = 0.99
+        past_window = 64
 
-    past_window = 64
     future_window = 32
     n_pred = (i_end_out-i_start_out)
     dataModule = Weather_dataModule(batch_train_size=batch_train_size, batch_valid_size=128, past_window=past_window, future_window=future_window)
     
-    model = TransformerModel(   n_features_encoder=n_features_encoder, n_features_decoder=n_features_decoder, n_pred=n_pred, 
+    model = TransformerModel(   n_features_encoder=19, n_features_decoder=18, n_pred=n_pred, 
                                 d_model = d_model, n_heads=n_heads, d_hid=d_hid, num_encoder_layers=num_encoder_layers, num_decoder_layers=num_decoder_layers,
                                 dropout = dropout, 
                                 lr =lr, max_lr=max_lr, gamma=gamma)
     
-    max_epochs = 20
+    max_epochs = 100
     trainer = pl.Trainer(
                         accelerator=device, devices=1,
                         max_epochs=max_epochs,
@@ -268,6 +270,8 @@ if __name__ == '__main__':
                         enable_checkpointing=False,
                         logger=wandb_logger,
                         # precision="16-mixed",
+                        gradient_clip_val=0.1,
+                        gradient_clip_algorithm="value",
                         callbacks=  [
                                         LearningRateMonitor(logging_interval='epoch'),
                                         PredictionLogger()
