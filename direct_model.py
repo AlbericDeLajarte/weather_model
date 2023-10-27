@@ -42,7 +42,7 @@ class TransformerModel(pl.LightningModule):
 
     def __init__(self, n_features_encoder: int, n_features_decoder: int, n_pred: int, d_model:int, n_heads: int, d_hid: int,
                  num_encoder_layers: int, num_decoder_layers:int, 
-                 dropout: float = 0.1, lr:float = 1e-3, max_lr:float=1e-4, gamma:float=0.9):
+                 dropout: float = 0.1, lr:float = 1e-3, max_lr:float=1e-4, gamma:float=0.9, activation='relu'):
         super().__init__()
         
         self.lr = lr
@@ -61,14 +61,24 @@ class TransformerModel(pl.LightningModule):
                                                 num_encoder_layers=num_encoder_layers, num_decoder_layers=num_decoder_layers, 
                                                 dropout=dropout, activation='gelu' ,batch_first=True, norm_first=True)
         
-        self.encoder_adapter = nn.Linear(n_features_encoder, d_model)
-        self.decoder_adapter = nn.Linear(n_features_decoder, d_model)
-        self.decoder = nn.Linear(d_model, n_pred)
-        self.decoder.bias.data.zero_()
+        activation_map = {'relu':nn.ReLU(), 'gelu': nn.GELU()}
+        
+        self.encoder_adapter = nn.Sequential(nn.Linear(n_features_encoder, d_model))#, 
+                                            #  activation_map[activation],
+                                            #  nn.Linear(d_model, d_model))
+        
+        self.decoder_adapter = nn.Sequential(nn.Linear(n_features_decoder, d_model))#, 
+                                            #  activation_map[activation],
+                                            #  nn.Linear(d_model, d_model))
+        
+        self.output_adapter = nn.Sequential(#nn.Linear(d_model, d_model), 
+                                             #activation_map[activation],
+                                             nn.Linear(d_model, n_pred))
+        
+        # self.decoder_adapter = nn.Linear(n_features_decoder, d_model)
+        # self.decoder.bias.data.zero_()
 
-        self.train_losses = []
-
-        # self.apply(self._init_weights)
+        self.apply(self._init_weights)
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -89,7 +99,7 @@ class TransformerModel(pl.LightningModule):
         target = self.decoder_adapter(target)
 
         output = self.transformer_model(input, target)
-        output = self.decoder(output)
+        output = self.output_adapter(output)
         return output
 
     
@@ -100,7 +110,6 @@ class TransformerModel(pl.LightningModule):
         # Compute loss and save it
         loss = self.loss(outputs, targets)
         
-        self.train_losses.append(loss.item())
         self.log("train/loss", np.sqrt(loss.item()))
         return loss
     
@@ -128,10 +137,18 @@ class TransformerModel(pl.LightningModule):
 
     def configure_optimizers(self):
         # optimizer = torch.optim.SGD(self.parameters(), lr=self.lr, momentum=0.9)
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=1e-4)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=0)
+        # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=warmup)
+
         # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=self.gamma)
-        scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, mode='exp_range',  base_lr=self.lr, max_lr=self.max_lr, step_size_up=10, cycle_momentum=False, gamma=self.gamma)
+        scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, mode='exp_range',  base_lr=self.lr, max_lr=self.max_lr, step_size_up=25, cycle_momentum=False, gamma=self.gamma)
         return [optimizer], [scheduler]
+    
+def warmup(current_step: int, warmup_steps:int=50, training_steps=1000):
+    if current_step < warmup_steps:  # current_step / warmup_steps * base_lr
+        return float(current_step / warmup_steps)
+    else:                                 # (num_training_steps - current_step) / (num_training_steps - warmup_steps) * base_lr
+        return max(0.0, float(training_steps - current_step) / float(max(1, training_steps - warmup_steps)))
     
 class PredictionLogger(pl.Callback):
 
@@ -163,7 +180,7 @@ class Weather_dataset(torch.utils.data.Dataset):
         # Load dataset from library
         # datas = [np.load(os.path.join(base_path, 'weather_model', 'processed_data', 'singapore', file, 
         #                             f'normalized_data_{dataset}.npy')) for dataset in datasets]
-        self.data = np.load(os.path.join(data_path, f'normalized_data_{data_type}.npy'))
+        self.data = np.load(os.path.join(data_path, f'normalized_data_{data_type}.npy'))#[:past_window+future_window+64]
         self.past_window = past_window
         self.future_window = future_window
 
@@ -184,7 +201,7 @@ class Weather_dataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         future_data = torch.tensor(self.data[idx+self.past_window:idx+self.past_window+self.future_window]).type(torch.float)
 
-        return ( (torch.tensor(self.data[idx:idx+self.past_window]).type(torch.float), torch.concatenate((future_data[:, :i_start_out], future_data[:, i_end_out:]), dim=1) ),
+        return ( (torch.tensor(self.data[idx:idx+self.past_window]).type(torch.float), torch.concat((future_data[:, :i_start_out], future_data[:, i_end_out:]), dim=1) ),
                  future_data[:, i_start_out:i_end_out]   )       
     
 
@@ -223,34 +240,46 @@ if __name__ == '__main__':
     wandb_logger = use_wandb and WandbLogger(project='weather_model')
     wandb.init()
 
+    # ideas
+    # - increase d_model
+    # - fix past windows to 32
+    # - increase lr, reduce overlap
+    # fix batch train to 128
+    # d_hid continuous integers
+    # relu vs gelu ?
+    # use more complex MLP encoder/decoder ?
+    # increase size of overfit to 64
+    # fix max_grad tp 0.5
+
     if len(wandb.config._as_dict())>1:
-        batch_train_size = wandb.config.batch_train_size
+        print(wandb.config)
+        batch_train_size = 128# wandb.config.batch_train_size
         d_model = wandb.config.d_model
         n_heads = wandb.config.n_heads
         d_hid = wandb.config.d_hid
-        # n_features_encoder = wandb.config.n_features_encoder
-        # n_features_decoder = wandb.config.n_features_decoder
         num_encoder_layers = wandb.config.num_encoder_layers
         num_decoder_layers = wandb.config.num_decoder_layers
-        dropout = wandb.config.dropout
+        dropout = 0# wandb.config.dropout
         lr = wandb.config.lr
         max_lr = wandb.config.max_lr
         gamma = wandb.config.gamma
         past_window = wandb.config.past_window
+        max_gradient = wandb.config.max_gradient
+        activation = wandb.config.activation
     else:
         batch_train_size = 128
         d_model = 32
-        n_heads = 8
-        d_hid = 32
-        # n_features_encoder = 19
-        # n_features_decoder = 18
-        num_encoder_layers = 2
-        num_decoder_layers = 2
-        dropout = 0
-        lr = 1e-5
-        max_lr = 1e-5
-        gamma = 0.99
-        past_window = 64
+        n_heads = 4
+        d_hid = 64
+        num_encoder_layers = 4
+        num_decoder_layers = 4
+        dropout = 0.1
+        lr = 2e-4
+        max_lr = 3e-3
+        gamma = 0.9
+        past_window = 320
+        max_gradient = 0.5
+        activation = 'gelu'
 
     future_window = 32
     n_pred = (i_end_out-i_start_out)
@@ -259,9 +288,9 @@ if __name__ == '__main__':
     model = TransformerModel(   n_features_encoder=19, n_features_decoder=18, n_pred=n_pred, 
                                 d_model = d_model, n_heads=n_heads, d_hid=d_hid, num_encoder_layers=num_encoder_layers, num_decoder_layers=num_decoder_layers,
                                 dropout = dropout, 
-                                lr =lr, max_lr=max_lr, gamma=gamma)
+                                lr =lr, max_lr=max_lr, gamma=gamma, activation=activation)
     
-    max_epochs = 100
+    max_epochs = 1000
     trainer = pl.Trainer(
                         accelerator=device, devices=1,
                         max_epochs=max_epochs,
@@ -270,8 +299,8 @@ if __name__ == '__main__':
                         enable_checkpointing=False,
                         logger=wandb_logger,
                         # precision="16-mixed",
-                        gradient_clip_val=0.1,
-                        gradient_clip_algorithm="value",
+                        gradient_clip_val=max_gradient,
+                        # gradient_clip_algorithm="value",
                         callbacks=  [
                                         LearningRateMonitor(logging_interval='epoch'),
                                         PredictionLogger()
